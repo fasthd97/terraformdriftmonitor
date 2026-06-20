@@ -89,4 +89,97 @@ against what's expected, then regenerate the SSM hash.
 
 ---
 
+## Pipeline fails partway through with expired/invalid credentials
+
+**Cause:** The deploy role's `max_session_duration` is set to 3600 seconds
+(1 hour) in `terraform/bootstrap/main.tf`. This is intentional — a short
+session window limits how long stolen credentials would be useful if
+ever leaked from a running job. For this project's pipeline (preflight,
+security scans, terraform plan/apply, package, deploy) that's normally
+plenty of time.
+
+**However**, if you expand the pipeline later — more security scanners,
+a large monorepo scan, slow integration tests, or a Terraform plan
+against a much bigger infrastructure footprint — a single job can
+exceed 1 hour. When the OIDC-issued credentials expire mid-job, AWS CLI
+and SDK calls start failing with `ExpiredToken` or `InvalidClientTokenId`
+errors that can look unrelated to the real cause.
+
+**Fix options, in order of preference:**
+1. Split the job into smaller jobs that each re-authenticate via OIDC
+   (each job gets a fresh 1-hour window) — best practice, keeps the
+   short-session security benefit
+2. Increase `max_session_duration` in `terraform/bootstrap/main.tf`
+   (up to AWS's max of 12 hours / 43200 seconds) — only do this if
+   splitting genuinely isn't practical, since it weakens the original
+   security intent of short-lived credentials
+3. Profile the slow step first — sometimes the real fix is making the
+   pipeline faster (caching dependencies, parallelizing scans) rather
+   than just giving it more time
+
+**If you do increase it**, re-run `terraform apply` in
+`terraform/bootstrap/` and note that the role integrity hash will
+change as a result — this is expected, not a tamper event, since the
+change came through Terraform itself.
+
+---
+
+## `git push` rejected with "would publish a private email address"
+
+**Cause:** Your GitHub account has "Keep my email address private"
+enabled (default for new accounts), but your local git config is set
+to your real email address. GitHub blocks the push rather than expose it.
+
+**Fix — use GitHub's no-reply address instead of your real email:**
+
+1. Find your no-reply address: https://github.com/settings/emails
+   Look for something like `12345678+yourusername@users.noreply.github.com`
+
+2. Set it as your git email going forward:
+   ```bash
+   git config --global user.email "12345678+yourusername@users.noreply.github.com"
+   ```
+
+3. **If a commit was already made before fixing the config**, the
+   config change alone won't fix that specific commit — it already
+   has your real email baked in. Rewrite just that commit's author info:
+   ```bash
+   git commit --amend --reset-author --no-edit
+   git push
+   ```
+
+**Why this is the better fix** (vs. the alternative GitHub offers, which
+is just making your email public): keeps your real address out of
+public commit history permanently, which matters for any repo —
+doubly so for a security-focused one.
+
+---
+
+## macOS hides dotfiles/folders (`.github`, `.gitignore`, `.git`) in Finder
+
+**Not a bug** — this is intentional macOS/Finder behavior, not specific
+to this project. Affects anything starting with a `.`.
+
+**Two ways to work around it:**
+
+1. **Use the terminal** (recommended — more precise, avoids drag-and-drop
+   mistakes with security-sensitive files):
+   ```bash
+   mv ~/Downloads/somefile.yml ~/terraformdriftmonitor/.github/workflows/somefile.yml
+   ls -la ~/terraformdriftmonitor/.github  # confirms it landed
+   ```
+
+2. **Make Finder show hidden files permanently:**
+   ```bash
+   defaults write com.apple.finder AppleShowAllFiles YES
+   killall Finder
+   ```
+   To reverse:
+   ```bash
+   defaults write com.apple.finder AppleShowAllFiles NO
+   killall Finder
+   ```
+
+---
+
 *(This file grows as we hit real issues during setup and testing.)*

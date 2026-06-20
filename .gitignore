@@ -1,4 +1,3 @@
-
 # Terraform
 .terraform/
 *.tfstate
@@ -14,10 +13,10 @@ override.tf.json
 # Terraform recommends committing it so everyone gets the same
 # provider versions on `terraform init` - this was confirmed by
 # Terraform's own output during the bootstrap apply earlier.
- 
+
 # Build output - regenerated on every deploy
 dist/
- 
+
 # Python
 __pycache__/
 *.pyc
@@ -25,16 +24,18 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
- 
+
 # OS files
 .DS_Store
 Thumbs.db
- 
+
 # Local test output
 response.json
- 
+
 # Editor
 .vscode/
 .idea/
 *.swp
- 
+
+# Local working notes - not for the public repo
+CHALLENGE-NOTES.md
