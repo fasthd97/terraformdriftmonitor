@@ -403,6 +403,77 @@ architecture, not a tuning change, and out of scope for the current
 timeline. Documenting the real bottlenecks precisely now so the next
 iteration doesn't have to rediscover them from scratch.
 
+---
+
+## Roadmap
+
+### Done
+
+- [x] Bootstrap infrastructure — OIDC provider, GitHub Actions deploy
+      role with permissions boundary, deployments bucket, SES (AURORA
+      out-of-band channel), SNS (pipeline alerts), SSM secrets
+- [x] `terraform/lambda/` root — the actual monitoring Lambda, its own
+      execution role, analysis cache bucket, drift-finding SNS topic,
+      EventBridge schedule, self-monitoring alarms
+- [x] Core checker logic — HCL parsing (provider versions + resource
+      types), HashiCorp registry diffing, GitHub repo scanning
+- [x] AI changelog analysis — bounded extraction, severity-gated,
+      cached by provider+version (not per-repo), interchangeable
+      model/effort via Terraform variables, time-budget safety cap
+- [x] Minimal `dev.yml` pipeline with checkov — satisfies the
+      one-required-security-tool minimum with a real, green run
+      against real Terraform
+- [x] End-to-end tested against a real public repo
+      (`fasthd97/driftmonitor`) — confirmed real findings, real SNS
+      delivery, real AI-extracted breaking changes
+
+### Not yet built
+
+- [ ] `preflight.py` — role + code integrity checking (SHA256 hash
+      comparison against what Terraform actually applied), just-in-time
+      `SimulatePrincipalPolicy` grant/revoke
+- [ ] `incident.py` — AURORA tamper response: silent permission
+      revocation before any notification, deliberately boring public
+      pipeline failure message, real forensic detail via the
+      out-of-band SES channel
+- [ ] `prod.yml` — approval-gated production pipeline, building on the
+      proven `dev.yml` skeleton
+- [ ] bandit, pip-audit, gitleaks — layered onto `dev.yml` alongside
+      checkov (currently the only security tool wired up — a
+      deliberate sequencing choice to get a real green run first, not
+      an oversight)
+- [ ] PR template + branch protection rules with a real reviewer
+      checklist (not a rubber stamp)
+- [ ] Negative test proving the role tamper detection actually works
+- [ ] Unit tests for the parser and version-diff logic (pytest, no
+      AWS credentials required — same pattern as the original
+      `driftmonitor` project's test suite)
+
+### Deferred, lower priority
+
+- [ ] Windows PowerShell build script (`scripts/build.ps1`) for local
+      `terraform apply` on Windows. Not required — the pipeline runs
+      on Linux GitHub Actions runners. The `build_script` Terraform
+      variable already supports swapping this in once built, with no
+      other changes needed.
+- [ ] Multi-vendor AI model support (OpenAI, Gemini) for changelog
+      analysis — deliberately deferred, Claude-only for now
+- [ ] SES sender migrated to a verified custom domain instead of Gmail
+      — cosmetic, not a security requirement
+- [ ] Remote Terraform state with locking/versioning instead of local
+      state files — see TROUBLESHOOTING.md for the real risk this
+      addresses (orphaned buckets after state loss)
+- [ ] Splitting long-running jobs into multiple OIDC-authenticated
+      steps rather than raising `max_session_duration`, if pipeline
+      runtime ever approaches the 1-hour session limit
+- [ ] Enterprise-scale architecture (database-backed repo config,
+      fan-out execution model) — see "Known scaling limitations" above
+      for the honest breakdown of why this isn't a small change
+
+---
+
+## See also
+
 
 
 - `TROUBLESHOOTING.md` — known gotchas hit during real setup (state loss, OIDC trust issues, email privacy, hidden dotfiles)
