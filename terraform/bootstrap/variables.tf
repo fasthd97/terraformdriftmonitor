@@ -14,6 +14,15 @@ variable "project_name" {
   description = "Name prefix for all resources in this project"
   type        = string
   default     = "tfdriftmonitor"
+
+  validation {
+    # Same fix as terraform/lambda/variables.tf — restricted to the
+    # safest common subset across IAM tags, S3 bucket names, SNS topic
+    # names, and SSM parameter paths. Catches invalid characters at
+    # `terraform plan` time rather than partway through a real apply.
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.project_name))
+    error_message = "project_name must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+  }
 }
 
 variable "github_org" {

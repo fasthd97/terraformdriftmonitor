@@ -41,28 +41,36 @@ EventBridge (schedule)
 
 ## Architecture
 
-Two **separate** Terraform roots, deliberately decoupled:
+Three **separate** Terraform roots, deliberately decoupled:
 
-| Root | Applied by | Contains |
-|---|---|---|
-| `terraform/bootstrap/` | A human, manually, once | OIDC provider, GitHub Actions deploy role + permissions boundary, deployments bucket, SES (AURORA alert), SNS (pipeline alerts), SSM placeholders |
-| `terraform/lambda/` | The CI/CD pipeline, every deploy | The actual monitoring Lambda, its own execution role, analysis cache bucket, drift-finding SNS topic, EventBridge schedule, self-monitoring alarms |
+| Root | Applied by | State | Contains |
+|---|---|---|---|
+| `terraform/bootstrap/` | A human, manually, once | Local | OIDC provider, GitHub Actions deploy role + permissions boundary, deployments bucket, lambda-code state bucket, SES (AURORA alert), SNS (pipeline alerts), SSM placeholders |
+| `terraform/lambda-infra/` | A human, manually | Local | The Lambda's execution role + IAM policies, analysis cache bucket, drift-finding SNS topic, CloudWatch log group, self-monitoring alarms |
+| `terraform/lambda-code/` | The CI/CD pipeline, every deploy | **Remote (S3)** | The actual Lambda function, its build mechanism, EventBridge schedule |
 
-**Why separate:** the deploy role that the pipeline assumes lives in
-`bootstrap/`. If the pipeline's own Terraform could modify that root,
-a compromised pipeline could escalate its own permissions. Keeping
-them apart means the pipeline can only ever touch what's in
-`terraform/lambda/` — nothing else.
+**Why three roots, not one or two:** the deploy role the pipeline assumes lives in `bootstrap/`. If the pipeline's own Terraform could modify that root, a compromised pipeline could escalate its own permissions — that's why `bootstrap/` stays human-only. Going one step further: the pipeline *also* shouldn't be able to create or modify IAM policies, SNS topics, or buckets, even ones unrelated to its own permissions — `lambda-infra/` exists specifically so the deploy role's permissions can stay scoped to **only** what `lambda-code/` actually needs (creating/updating the function and its EventBridge trigger). Each split follows the same blast-radius reasoning, applied one level further than the split before it.
+
+**Why `lambda-code/` needs remote state and the other two don't:** GitHub Actions runners are stateless and disposable — a fresh, empty machine spins up for every workflow run. `bootstrap/` and `lambda-infra/` are always applied by a human on the same machine, so local state works fine. `lambda-code/` is applied by a *different machine every single time* — without remote state, Terraform would have no memory of what it created in any previous run, and would try to recreate everything from scratch on every deploy, failing with `AlreadyExists` errors. State lives in a dedicated S3 bucket (created in `bootstrap/`) with Terraform's native locking enabled (`use_lockfile = true`, no DynamoDB table needed).
 
 ### Deployment order — hard requirement
 
-**`terraform/bootstrap/` MUST be applied before `terraform/lambda/`,
-every time.** The lambda root reads bootstrap's SSM parameters via
-`data "aws_ssm_parameter"` lookups (not constructed ARNs) specifically
-so that if bootstrap hasn't been applied yet, `terraform plan` on the
-lambda root fails immediately with a clear "parameter not found"
-error — rather than letting a misconfiguration through to a confusing
-runtime failure inside the deployed Lambda later.
+**`bootstrap/` → `lambda-infra/` → `lambda-code/`, always in that order.** Each root reads the previous one's resources via `data` source lookups by name (not constructed ARNs, not remote state sharing) — if a prerequisite root hasn't been applied yet, `terraform plan` on the next one fails immediately with a clear "not found" error, rather than letting a misconfiguration through to a confusing runtime failure later.
+
+### How the deploy pipeline actually works
+
+`.github/workflows/dev.yml` has two jobs:
+
+1. **`security-scan`** — checkov against all Terraform in the repo. Runs on every trigger, including pull requests. Read-only, never touches AWS.
+2. **`deploy`** — runs `terraform init` / `plan` / `apply` against `terraform/lambda-code/` specifically (never `lambda-infra` or `bootstrap` — the deploy role's permissions don't extend to either, by design, so pointing this job anywhere else would fail on a permissions error rather than silently doing the wrong thing).
+
+**Deploy is skipped on pull requests, deliberately.** Running `terraform apply` against real infrastructure on every PR — including unreviewed ones — would mean unreviewed code could deploy itself. The job has `if: github.event_name != 'pull_request'`; checkov still scans PRs, nothing in `deploy` ever runs against one.
+
+**Authentication is via OIDC, not stored credentials.** No long-lived AWS access keys exist in GitHub at all. The job requests a short-lived OIDC token proving "this is really a run of this repo, on this branch," and exchanges it for temporary credentials scoped to the `tfdriftmonitor-github-deploy` role from `bootstrap/`. This requires an explicit `permissions: id-token: write` block on the job — the single most commonly forgotten requirement when wiring up GitHub OIDC, and one that fails with an error that doesn't obviously point back to the missing block.
+
+**`terraform init` uses `-backend-config` flags, not a hardcoded bucket name.** Terraform backend blocks can't use variables or interpolation, and the state bucket's name is unpredictable by design (same reasoning as the deployments bucket). The actual bucket name comes from the `STATE_BUCKET` repo variable, supplied at init time, never committed as a literal string anywhere in this repo.
+
+**`terraform apply -auto-approve` — no human is in the loop to type "yes."** This is standard for CI/CD specifically. It does **not** mean confirmation is skipped everywhere: local applies to `bootstrap/` and `lambda-infra/` still require typing `yes`, since neither root is ever applied by CI.
 
 ---
 
@@ -98,45 +106,64 @@ Actions → Variables) using the bootstrap outputs:
 ```bash
 gh variable set AWS_ROLE_ARN --body "<github_actions_role_arn output>"
 gh variable set DEPLOYMENTS_BUCKET --body "<deployments_bucket_name output>"
+gh variable set STATE_BUCKET --body "<lambda_state_bucket_name output>"
 gh variable set AWS_REGION --body "us-east-1"
 ```
 
-### 2. Lambda root (deployed by the pipeline)
-
-Not yet wired into a deploy workflow step — see roadmap. Can be
-applied manually for now, same dependency order:
+### 2. Lambda infrastructure (one-time, manual)
 
 ```bash
-cd terraform/lambda
+cd terraform/lambda-infra
 terraform init
 terraform plan -var="alert_email=you@example.com"
 terraform apply -var="alert_email=you@example.com"
+```
+
+Confirm the SNS subscription email from this apply's output too —
+it's a separate topic from bootstrap's pipeline alerts, so it needs
+its own confirmation.
+
+### 3. Lambda code (deployed automatically by the pipeline)
+
+This step is what `.github/workflows/dev.yml`'s `deploy` job runs on
+every push to `dev` — see "How the deploy pipeline actually works"
+above. You generally won't run this manually once the pipeline is
+wired up, but the commands are the same if you ever need to:
+
+```bash
+cd terraform/lambda-code
+terraform init \
+  -backend-config="bucket=<your STATE_BUCKET value>" \
+  -backend-config="region=us-east-1"
+terraform plan
+terraform apply
 ```
 
 ---
 
 ## Configuration
 
-All settings in `terraform/lambda/variables.tf`. Override with `-var`
-or a `terraform.tfvars` file.
+Settings are split across two roots now, matching where each
+variable's resources actually live.
 
-| Variable | Default | Description |
-|---|---|---|
-| `aws_region` | `us-east-1` | Must match the region bootstrap was applied to |
-| `project_name` | `tfdriftmonitor` | Must match bootstrap's value exactly |
-| `alert_email` | *(required)* | Drift-finding SNS notifications |
-| `schedule_expression` | `rate(7 days)` | How often the check runs |
-| `ai_model` | `claude-sonnet-4-6` | Swap to compare model performance on changelog extraction |
-| `ai_effort` | `medium` | Anthropic API effort level (`low`/`medium`/`high`/`max`) |
-| `ai_analysis_severity_threshold` | `CRITICAL` | Minimum severity that triggers an AI changelog call |
-| `ai_changelog_cache_ttl_hours` | `2160` (90 days) | `0` = indefinite — valid here since a given provider version's release notes never change |
-| `lambda_timeout_seconds` | `300` | See reasoning below |
-| `lambda_memory_mb` | `256` | See reasoning below |
-| `log_retention_days` | `30` | CloudWatch log retention |
+| Variable | Root | Default | Description |
+|---|---|---|---|
+| `aws_region` | both | `us-east-1` | Must match the region bootstrap was applied to |
+| `project_name` | both | `tfdriftmonitor` | Must match across all three roots exactly |
+| `alert_email` | `lambda-infra` | *(required)* | Drift-finding SNS notifications |
+| `log_retention_days` | `lambda-infra` | `30` | CloudWatch log retention |
+| `schedule_expression` | `lambda-code` | `rate(7 days)` | How often the check runs |
+| `ai_model` | `lambda-code` | `claude-sonnet-4-6` | Swap to compare model performance on changelog extraction |
+| `ai_effort` | `lambda-code` | `medium` | Anthropic API effort level (`low`/`medium`/`high`/`max`) |
+| `ai_analysis_severity_threshold` | `lambda-code` | `CRITICAL` | Minimum severity that triggers an AI changelog call |
+| `ai_changelog_cache_ttl_hours` | `lambda-code` | `2160` (90 days) | `0` = indefinite — valid here since a given provider version's release notes never change |
+| `ai_time_budget_seconds` | `lambda-code` | `180` | Max wall-clock time per run on new AI calls before deferring remaining findings |
+| `lambda_timeout_seconds` | `lambda-code` | `300` | See reasoning below |
+| `lambda_memory_mb` | `lambda-code` | `256` | See reasoning below |
 
 ### Lambda timeout & memory — reasoning, and where to adjust
 
-**Where to change these:** `terraform/lambda/variables.tf` →
+**Where to change these:** `terraform/lambda-code/variables.tf` →
 `lambda_timeout_seconds` and `lambda_memory_mb`.
 
 **Why 300 seconds:** this Lambda's per-run work is: read SSM config →
@@ -410,22 +437,32 @@ iteration doesn't have to rediscover them from scratch.
 ### Done
 
 - [x] Bootstrap infrastructure — OIDC provider, GitHub Actions deploy
-      role with permissions boundary, deployments bucket, SES (AURORA
-      out-of-band channel), SNS (pipeline alerts), SSM secrets
-- [x] `terraform/lambda/` root — the actual monitoring Lambda, its own
-      execution role, analysis cache bucket, drift-finding SNS topic,
-      EventBridge schedule, self-monitoring alarms
+      role with permissions boundary, deployments bucket, lambda-code
+      state bucket, SES (AURORA out-of-band channel), SNS (pipeline
+      alerts), SSM secrets
+- [x] `terraform/lambda-infra/` — the Lambda's execution role + IAM
+      policies, analysis cache bucket, drift-finding SNS topic,
+      CloudWatch log group, self-monitoring alarms (human-applied,
+      local state)
+- [x] `terraform/lambda-code/` — the actual Lambda function, build
+      mechanism, EventBridge schedule (CI/CD-applied, **remote S3
+      state with native locking** — required because GitHub Actions
+      runners are ephemeral and can't use local state)
+- [x] **Real deploy step wired into `dev.yml`** — OIDC auth, scoped to
+      only `terraform/lambda-code/` (the deploy role has no permissions
+      over `lambda-infra` or `bootstrap`, by design), skipped on pull
+      requests, `-auto-approve` since no human is in the CI loop
 - [x] Core checker logic — HCL parsing (provider versions + resource
       types), HashiCorp registry diffing, GitHub repo scanning
 - [x] AI changelog analysis — bounded extraction, severity-gated,
       cached by provider+version (not per-repo), interchangeable
       model/effort via Terraform variables, time-budget safety cap
-- [x] Minimal `dev.yml` pipeline with checkov — satisfies the
-      one-required-security-tool minimum with a real, green run
-      against real Terraform
+- [x] checkov security scan — satisfies the one-required-security-tool
+      minimum with a real, green run against real Terraform
 - [x] End-to-end tested against a real public repo
       (`fasthd97/driftmonitor`) — confirmed real findings, real SNS
-      delivery, real AI-extracted breaking changes
+      delivery, real AI-extracted breaking changes, confirmed working
+      AFTER the three-root split (not just before it)
 
 ### Not yet built
 
@@ -460,9 +497,6 @@ iteration doesn't have to rediscover them from scratch.
       analysis — deliberately deferred, Claude-only for now
 - [ ] SES sender migrated to a verified custom domain instead of Gmail
       — cosmetic, not a security requirement
-- [ ] Remote Terraform state with locking/versioning instead of local
-      state files — see TROUBLESHOOTING.md for the real risk this
-      addresses (orphaned buckets after state loss)
 - [ ] Splitting long-running jobs into multiple OIDC-authenticated
       steps rather than raising `max_session_duration`, if pipeline
       runtime ever approaches the 1-hour session limit

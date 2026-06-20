@@ -1,15 +1,23 @@
 ################################################################################
 # .github/workflows/dev.yml
 # ---------------------------
-# MINIMAL SKELETON — intentionally small to get a real, green run in the
-# Actions tab as fast as possible. Everything else (preflight, bandit,
-# pip-audit, gitleaks, AURORA tamper response, prod approval gate) layers
-# on top of this once it's proven working.
+# Two jobs:
+#   1. security-scan — checkov against all Terraform in the repo (read-only,
+#      runs on every trigger including PRs — safe, nothing touches AWS)
+#   2. deploy        — applies terraform/lambda-code/ for real (skipped on
+#      PRs — see the `if:` condition below for why)
 #
 # Why checkov specifically for the required security step:
 # This project is fundamentally about Terraform. checkov scans the real
-# Terraform in this repo (terraform/bootstrap, terraform/lambda) for
-# security misconfigurations — not a token gesture against a toy example.
+# Terraform in this repo for security misconfigurations — not a token
+# gesture against a toy example.
+#
+# Why deploy only touches terraform/lambda-code/, never lambda-infra or
+# bootstrap: the GitHub Actions deploy role (created in bootstrap/) has
+# permissions scoped EXACTLY to what lambda-code/ needs — it cannot
+# create/modify IAM policies, SNS topics, or the analysis cache bucket.
+# Pointing this job at any other root would fail on a permissions error,
+# by design, not by accident.
 ################################################################################
 
 name: dev
@@ -41,3 +49,93 @@ jobs:
           # permissions boundary's wildcard resource scope).
           # Once findings are triaged, flip this to false to enforce.
           soft_fail: true
+
+  deploy:
+    name: Deploy Lambda (terraform/lambda-code)
+    runs-on: ubuntu-latest
+    needs: security-scan
+
+    # WHY THIS CONDITION: running `terraform apply` against real AWS
+    # infrastructure on every pull request — including ones that haven't
+    # been reviewed or merged yet — would mean unreviewed code could
+    # deploy itself. checkov still runs on PRs (read-only, safe). Actual
+    # deployment only happens on a real push to dev, or a manual run.
+    if: github.event_name != 'pull_request'
+
+    # WHY THIS PERMISSIONS BLOCK: GitHub Actions jobs get NO permissions
+    # by default for requesting an OIDC token. Without this exact block,
+    # the configure-aws-credentials step below fails — this is the single
+    # most commonly forgotten requirement when wiring up GitHub OIDC, and
+    # it fails with a generic-looking error that doesn't obviously point
+    # back to this missing block.
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      # WHY OIDC INSTEAD OF STORED CREDENTIALS: no long-lived AWS access
+      # keys exist in GitHub at all. This step exchanges a short-lived
+      # OIDC token (proving "this really is a run of THIS repo, on THIS
+      # branch") for temporary AWS credentials, scoped to exactly the
+      # tfdriftmonitor-github-deploy role created in terraform/bootstrap/.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Pinned to 3.12 to exactly match the Lambda runtime. build.sh
+      # already targets 3.12 explicitly via pip's --python-version flag
+      # regardless of what's running it, so this isn't strictly required
+      # — but pinning removes an entire class of "worked locally, broke
+      # on a future Actions runner image" risk for negligible cost.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned to match the version used for all local development this
+      # session (1.15.x) — required_version >= 1.11 in versions.tf would
+      # catch a real mismatch anyway, but pinning here means CI never
+      # silently picks up a newer Terraform release before it's been
+      # tested locally first.
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+
+      # WHY -backend-config FLAGS INSTEAD OF A HARDCODED BUCKET NAME:
+      # Terraform backend blocks cannot use variables or interpolation —
+      # see terraform/lambda-code/backend.tf for the full explanation.
+      # STATE_BUCKET is unpredictable by design (same reasoning as the
+      # deployments bucket), so it's supplied here from a repo variable,
+      # never committed as a literal string anywhere in this repo.
+      - name: Terraform init
+        working-directory: terraform/lambda-code
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      # Kept as its own visible step for audit purposes — anyone reviewing
+      # a run in the Actions tab can see exactly what changed, even though
+      # nothing currently gates on this step's output (no human reviews
+      # plan output before apply on dev — see prod.yml, not yet built, for
+      # where that gate belongs).
+      - name: Terraform plan
+        working-directory: terraform/lambda-code
+        run: terraform plan
+
+      # -auto-approve because there's no human in this loop to type "yes"
+      # — the interactive confirmation prompt every local apply this
+      # session has required simply has no equivalent in a non-interactive
+      # CI run. This is standard practice for CI/CD specifically; it does
+      # NOT mean confirmation is skipped everywhere — local applies to
+      # terraform/bootstrap/ and terraform/lambda-infra/ still require a
+      # human to type "yes", since those roots are never applied by CI.
+      - name: Terraform apply
+        working-directory: terraform/lambda-code
+        run: terraform apply -auto-approve

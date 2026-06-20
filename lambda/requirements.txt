@@ -1,0 +1,17 @@
+# Lambda Python dependencies
+# --------------------------
+# boto3 is intentionally excluded — pre-installed in the AWS Lambda
+# Python runtime, packaging it adds ~10MB to the zip for no benefit.
+
+# requests: used by github.py, hashicorp.py, ai_changelog.py
+requests==2.32.3
+
+# python-hcl2: parses Terraform HCL files in terraform_parser.py.
+# A proper HCL parser rather than regex, so we correctly handle all
+# valid HCL2 syntax, not just the common-case formatting.
+python-hcl2==8.1.2
+
+# packaging: semantic version comparison in checks/terraform_versions.py.
+# Handles cases like "5.9.0" < "5.100.0" that plain string sorting
+# would get wrong.
+packaging==24.2

@@ -18,6 +18,11 @@ output "deployments_bucket_name" {
   value       = aws_s3_bucket.deployments.bucket
 }
 
+output "lambda_state_bucket_name" {
+  description = "Name of the S3 bucket holding terraform/lambda-code/'s remote state. Set this as the STATE_BUCKET repo variable — required because GitHub Actions runners are ephemeral and cannot use local state."
+  value       = aws_s3_bucket.lambda_state.bucket
+}
+
 output "oidc_provider_arn" {
   description = "ARN of the GitHub OIDC provider"
   value       = aws_iam_openid_connect_provider.github.arn
@@ -34,9 +39,9 @@ output "ses_alert_identity_arn" {
 }
 
 output "role_integrity_hash" {
-  description = "Current SHA256 hash of the deploy role's policy — useful for manual verification"
+  description = "Current SHA256 hash of the deploy role's policy — useful for manual verification. Marked sensitive only because it derives from an aws_ssm_parameter value attribute, which Terraform always treats as sensitive regardless of parameter type. The hash itself reveals nothing about the underlying policy content."
   value       = aws_ssm_parameter.role_integrity_hash.value
-  sensitive = true
+  sensitive   = true
 }
 
 output "post_apply_checklist" {
@@ -53,6 +58,7 @@ output "post_apply_checklist" {
     4. Set these as GitHub repo variables (Settings > Secrets and variables > Actions > Variables):
        AWS_ROLE_ARN = (see github_actions_role_arn output above)
        DEPLOYMENTS_BUCKET = (see deployments_bucket_name output above)
+       STATE_BUCKET = (see lambda_state_bucket_name output above)
        AWS_REGION = ${var.aws_region}
   EOT
 }

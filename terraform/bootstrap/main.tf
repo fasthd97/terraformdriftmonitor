@@ -15,6 +15,18 @@
 
 
 ################################################################################
+# DATA SOURCES
+# --------------
+# aws_caller_identity gives us the account ID, used to construct the
+# lambda-infra execution role's ARN by convention (see the
+# ReadLambdaExecutionRole statement below) without needing a cross-root
+# data lookup against lambda-infra's state.
+################################################################################
+
+data "aws_caller_identity" "current" {}
+
+
+################################################################################
 # 1. OIDC PROVIDER
 # -----------------
 # This tells AWS to trust tokens issued by GitHub's OIDC identity provider.
@@ -79,9 +91,21 @@ data "aws_iam_policy_document" "deploy_role_boundary" {
       "s3:PutObject",
       "s3:ListBucket",
       "s3:GetBucketLocation",
+      "s3:DeleteObject", # added for lambda-code's state lock file release
       "lambda:UpdateFunctionCode",
       "lambda:GetFunction",
       "lambda:GetFunctionConfiguration",
+      "lambda:CreateFunction",
+      "lambda:UpdateFunctionConfiguration",
+      "lambda:TagResource",
+      "lambda:UntagResource",
+      "lambda:AddPermission",
+      "lambda:GetPolicy",
+      "events:PutRule",
+      "events:DescribeRule",
+      "events:ListTagsForResource",
+      "events:PutTargets",
+      "events:ListTargetsByRule",
       "iam:GetRole",
       "iam:GetRolePolicy",
       "iam:ListRolePolicies",
@@ -233,6 +257,76 @@ data "aws_iam_policy_document" "github_actions_deploy_permissions" {
     # script to verify the role hasn't been tampered with.
     resources = [aws_iam_role.github_actions_deploy.arn]
   }
+
+  statement {
+    sid    = "LambdaStateBucketAccess"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+      "s3:DeleteObject", # releases the .tflock file after each apply —
+                          # this is how Terraform's native S3 locking
+                          # works, not a route to deleting infrastructure
+    ]
+    resources = [
+      aws_s3_bucket.lambda_state.arn,
+      "${aws_s3_bucket.lambda_state.arn}/*",
+    ]
+  }
+
+  statement {
+    sid    = "ReadLambdaExecutionRole"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+    ]
+    # Read-only lookup of the LAMBDA's execution role (a different role
+    # than its own, created by terraform/lambda-infra/) — needed so
+    # terraform/lambda-code/ can attach the function to that role via
+    # a data source, without lambda-code ever being able to modify it.
+    resources = [
+      "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-lambda-role"
+    ]
+  }
+
+  statement {
+    sid    = "ManageDriftMonitorFunction"
+    effect = "Allow"
+    actions = [
+      "lambda:CreateFunction",
+      "lambda:UpdateFunctionConfiguration",
+      "lambda:TagResource",
+      "lambda:UntagResource",
+      "lambda:AddPermission",
+      "lambda:GetPolicy",
+    ]
+    # Same function ARN pattern already used for UpdateFunctionCode above.
+    # Deliberately EXCLUDES lambda:DeleteFunction and RemovePermission —
+    # this role can create and update the function, never delete it.
+    # See README for the manual deletion procedure if this function
+    # ever genuinely needs to be removed.
+    resources = [
+      "arn:aws:lambda:*:*:function:${var.project_name}*"
+    ]
+  }
+
+  statement {
+    sid    = "ManageDriftMonitorSchedule"
+    effect = "Allow"
+    actions = [
+      "events:PutRule",
+      "events:DescribeRule",
+      "events:ListTagsForResource",
+      "events:PutTargets",
+      "events:ListTargetsByRule",
+    ]
+    # Deliberately EXCLUDES events:DeleteRule and RemoveTargets — same
+    # create/update-only philosophy as the function permissions above.
+    resources = [
+      "arn:aws:events:*:*:rule/${var.project_name}*"
+    ]
+  }
 }
 
 resource "aws_iam_policy" "github_actions_deploy_permissions" {
@@ -270,7 +364,7 @@ resource "aws_s3_bucket" "deployments" {
 
   tags = {
     Project = var.project_name
-    Purpose = "Stores packaged Lambda deployment artifacts from CI/CD"
+    Purpose = "Stores packaged Lambda deployment artifacts from CI CD"
   }
 }
 
@@ -322,6 +416,77 @@ resource "aws_s3_bucket_lifecycle_configuration" "deployments" {
     }
   }
 }
+
+################################################################################
+# 3b. LAMBDA-CODE TERRAFORM STATE BUCKET
+# -----------------------------------------
+# Holds the remote state for terraform/lambda-code/ — the ONLY root in
+# this project applied by an ephemeral CI/CD runner rather than a human
+# on the same machine every time. GitHub Actions runners are stateless
+# and disposable; a fresh, empty machine spins up for every workflow
+# run. Without a remote backend, Terraform state created during one
+# CI run would be destroyed along with the runner, and the NEXT run
+# would start from zero state, try to re-create resources that already
+# exist, and fail with AlreadyExists errors on every run after the
+# first. This is a hard architectural requirement, not a tuning choice.
+#
+# UNPREDICTABLE NAME — same reasoning as the deployments bucket, applied
+# here too: Terraform state conventionally holds sensitive data (resource
+# IDs, sometimes values that should have stayed secret if not careful).
+# This deserves the same defense-in-depth as deployment artifacts, not
+# the simpler account-ID-suffix pattern used for the analysis cache
+# bucket (which only ever holds public changelog summaries).
+#
+# VERSIONING — critical here even more than for other buckets. Losing
+# Terraform state entirely is catastrophic (Terraform would no longer
+# know what it manages). Versioning means a corrupted or accidentally
+# overwritten state file is always recoverable.
+#
+# NO LIFECYCLE EXPIRATION — deliberately different from the deployments
+# bucket. State history should persist indefinitely, not auto-expire;
+# the storage cost of keeping old state versions forever is negligible.
+################################################################################
+
+resource "random_id" "lambda_state_suffix" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "lambda_state" {
+  bucket = "lambda-state-${random_id.lambda_state_suffix.hex}"
+
+  tags = {
+    Project = var.project_name
+    Purpose = "Remote Terraform state for terraform lambda-code applied by CI CD"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "lambda_state" {
+  bucket = aws_s3_bucket.lambda_state.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "lambda_state" {
+  bucket = aws_s3_bucket.lambda_state.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "lambda_state" {
+  bucket = aws_s3_bucket.lambda_state.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 ################################################################################
 # 4. SES — OUT-OF-BAND AURORA ALERT
 # ------------------------------------
@@ -400,7 +565,7 @@ resource "aws_sns_topic" "pipeline_alerts" {
 
   tags = {
     Project = var.project_name
-    Purpose = "Routine CI/CD pipeline notifications"
+    Purpose = "Routine CI CD pipeline notifications"
   }
 }
 
