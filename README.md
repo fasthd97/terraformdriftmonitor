@@ -1,0 +1,298 @@
+# terraformdriftmonitor
+
+Monitors Terraform provider version drift across GitHub repos — flags
+when a pinned provider version (e.g. `aws ~> 5.0`) falls behind what
+HashiCorp's registry has available, with AI-assisted changelog analysis
+on major version bumps to judge whether breaking changes actually
+affect resources you use.
+
+This project is a deliberate continuation of
+[fasthd97/driftmonitor](https://github.com/fasthd97/driftmonitor),
+which monitors AWS CloudFormation stacks for Lambda runtime EOL drift.
+That tool is already deployed and running. This repository extends the
+same underlying idea — catching silent dependency drift before it
+causes an incident — into the Terraform/provider-version space, with a
+full CI/CD security pipeline built around it.
+
+> **Status:** actively being built. Sections below marked
+> `(coming soon)` cover features not yet implemented.
+
+---
+
+## How it works
+
+```
+EventBridge (schedule)
+       ↓
+   Lambda
+       ↓
+1. Reads configured repo list from SSM
+2. Fetches .tf files from each repo via GitHub API
+3. Parses provider version constraints (HCL)
+4. Checks each provider against the HashiCorp registry API
+5. For CRITICAL findings (major version available), AI extracts
+   breaking changes from the provider's release notes — cached,
+   one call per provider+version, ever — see lambda/checks/ai_changelog.py
+       ↓
+6. Findings → SNS (email) + CloudWatch logs
+```
+
+---
+
+## Architecture
+
+Two **separate** Terraform roots, deliberately decoupled:
+
+| Root | Applied by | Contains |
+|---|---|---|
+| `terraform/bootstrap/` | A human, manually, once | OIDC provider, GitHub Actions deploy role + permissions boundary, deployments bucket, SES (AURORA alert), SNS (pipeline alerts), SSM placeholders |
+| `terraform/lambda/` | The CI/CD pipeline, every deploy | The actual monitoring Lambda, its own execution role, analysis cache bucket, drift-finding SNS topic, EventBridge schedule, self-monitoring alarms |
+
+**Why separate:** the deploy role that the pipeline assumes lives in
+`bootstrap/`. If the pipeline's own Terraform could modify that root,
+a compromised pipeline could escalate its own permissions. Keeping
+them apart means the pipeline can only ever touch what's in
+`terraform/lambda/` — nothing else.
+
+### Deployment order — hard requirement
+
+**`terraform/bootstrap/` MUST be applied before `terraform/lambda/`,
+every time.** The lambda root reads bootstrap's SSM parameters via
+`data "aws_ssm_parameter"` lookups (not constructed ARNs) specifically
+so that if bootstrap hasn't been applied yet, `terraform plan` on the
+lambda root fails immediately with a clear "parameter not found"
+error — rather than letting a misconfiguration through to a confusing
+runtime failure inside the deployed Lambda later.
+
+---
+
+## Setup
+
+### 1. Bootstrap (one-time, manual)
+
+```bash
+cd terraform/bootstrap
+terraform init
+terraform plan \
+  -var="ses_alert_email=you@example.com" \
+  -var="sns_alert_email=you@example.com"
+terraform apply \
+  -var="ses_alert_email=you@example.com" \
+  -var="sns_alert_email=you@example.com"
+```
+
+After apply, the output includes a checklist — confirm both the SES
+and SNS subscription emails, then fill in the SSM placeholders:
+
+```bash
+aws ssm put-parameter --name "/tfdriftmonitor/anthropic-api-key" --value "sk-ant-..." --type SecureString --overwrite --region us-east-1
+aws ssm put-parameter --name "/tfdriftmonitor/github-token" --value "ghp_..." --type SecureString --overwrite --region us-east-1
+aws ssm put-parameter --name "/tfdriftmonitor/terraform-repos" --value '{"repos":[...]}' --type SecureString --overwrite --region us-east-1
+```
+
+See `terraform-repos-example.md` for repo config examples.
+
+Set the GitHub repo variables (Settings → Secrets and variables →
+Actions → Variables) using the bootstrap outputs:
+
+```bash
+gh variable set AWS_ROLE_ARN --body "<github_actions_role_arn output>"
+gh variable set DEPLOYMENTS_BUCKET --body "<deployments_bucket_name output>"
+gh variable set AWS_REGION --body "us-east-1"
+```
+
+### 2. Lambda root (deployed by the pipeline)
+
+Not yet wired into a deploy workflow step — see roadmap. Can be
+applied manually for now, same dependency order:
+
+```bash
+cd terraform/lambda
+terraform init
+terraform plan -var="alert_email=you@example.com"
+terraform apply -var="alert_email=you@example.com"
+```
+
+---
+
+## Configuration
+
+All settings in `terraform/lambda/variables.tf`. Override with `-var`
+or a `terraform.tfvars` file.
+
+| Variable | Default | Description |
+|---|---|---|
+| `aws_region` | `us-east-1` | Must match the region bootstrap was applied to |
+| `project_name` | `tfdriftmonitor` | Must match bootstrap's value exactly |
+| `alert_email` | *(required)* | Drift-finding SNS notifications |
+| `schedule_expression` | `rate(7 days)` | How often the check runs |
+| `ai_model` | `claude-sonnet-4-6` | Swap to compare model performance on changelog extraction |
+| `ai_effort` | `medium` | Anthropic API effort level (`low`/`medium`/`high`/`max`) |
+| `ai_analysis_severity_threshold` | `CRITICAL` | Minimum severity that triggers an AI changelog call |
+| `ai_changelog_cache_ttl_hours` | `2160` (90 days) | `0` = indefinite — valid here since a given provider version's release notes never change |
+| `lambda_timeout_seconds` | `300` | See reasoning below |
+| `lambda_memory_mb` | `256` | See reasoning below |
+| `log_retention_days` | `30` | CloudWatch log retention |
+
+### Lambda timeout & memory — reasoning, and where to adjust
+
+**Where to change these:** `terraform/lambda/variables.tf` →
+`lambda_timeout_seconds` and `lambda_memory_mb`.
+
+**Why 300 seconds:** this Lambda's per-run work is: read SSM config →
+fetch `.tf` files per configured repo (GitHub API) → check each
+provider against the registry (HashiCorp API) → for CRITICAL findings
+not already cached, call Claude for changelog extraction. A small
+config (1-3 repos) finishes in well under a minute. The default is
+sized for the worst case: many configured repos, several hitting
+CRITICAL on the same cache-cold run, meaning multiple un-cached AI
+calls happen back to back in one invocation. Each of those can take
+several seconds, more at higher `ai_effort` settings.
+
+**Why 256 MB:** counterintuitively, this isn't really about RAM
+capacity — this workload barely uses any memory (no large HTML
+payloads, just small JSON/text). The real reason is that AWS Lambda
+ties memory allocation to CPU and **network throughput**. This Lambda
+is almost entirely I/O-bound — a chain of small HTTP calls to GitHub,
+HashiCorp, and Anthropic. Dropping to AWS's 128 MB minimum could make
+those network calls slower, which could *increase* timeout risk rather
+than just save a few cents — the opposite of the intended savings.
+
+If you expand this project significantly (many more repos, much
+larger `.tf` files, higher `ai_effort` as the default), re-check these
+values against your actual usage rather than assuming the defaults
+still fit.
+
+---
+
+## Checking CloudWatch logs
+
+Every run — scheduled or manual — writes detailed step-by-step output
+to CloudWatch. This is where you actually see *why* a run found what
+it found, or why it failed, in far more detail than the SNS email
+provides.
+
+### The easy way — `aws logs tail`
+
+For almost everything, this one command is all you need:
+
+```bash
+aws logs tail /aws/lambda/tfdriftmonitor --region us-east-1
+```
+
+This fetches the most recent log events automatically — no need to
+look up a stream name first. Useful flags:
+
+```bash
+# Follow new log output live, as it happens (like `tail -f`)
+aws logs tail /aws/lambda/tfdriftmonitor --region us-east-1 --follow
+
+# Only show the last 10 minutes
+aws logs tail /aws/lambda/tfdriftmonitor --region us-east-1 --since 10m
+
+# Only show logs from the last hour, formatted with short timestamps
+aws logs tail /aws/lambda/tfdriftmonitor --region us-east-1 --since 1h --format short
+```
+
+Use `--follow` right after triggering a manual run (see below) to
+watch it execute in real time.
+
+### The manual way — when you need more control
+
+`aws logs tail` covers most cases, but sometimes you want a *specific*
+run's output, or to fetch a stream's events as a single block. That
+requires two steps, because CloudWatch organizes logs into **streams**
+(roughly: one stream per "warm" Lambda execution environment, which
+can contain several invocations) and you need a stream's exact name
+before you can read its events.
+
+**Step 1 — find the most recent stream name:**
+
+```bash
+aws logs describe-log-streams \
+  --log-group-name /aws/lambda/tfdriftmonitor \
+  --region us-east-1 \
+  --order-by LastEventTime \
+  --descending \
+  --output text \
+  --query "logStreams[0].logStreamName"
+```
+
+This prints something like:
+```
+2026/06/20/[$LATEST]3b6cfff605e043bd9b9084e41a09247f
+```
+
+**Step 2 — fetch that stream's events:**
+
+```bash
+aws logs get-log-events \
+  --log-group-name /aws/lambda/tfdriftmonitor \
+  --log-stream-name 'PASTE_THE_STREAM_NAME_FROM_STEP_1_HERE' \
+  --region us-east-1 \
+  --query "events[].message" \
+  --output text
+```
+
+**The one gotcha that will bite you:** the stream name contains a
+literal `$` (in `[$LATEST]`). **Always wrap it in single quotes**, not
+double quotes. In bash/zsh, double quotes still let `$LATEST` be
+interpreted as an (empty, undefined) shell variable — silently
+mangling the stream name into something that doesn't exist, and
+you'll get a confusing "log stream does not exist" error that has
+nothing to do with your actual logs. Single quotes prevent any of that
+substitution.
+
+```bash
+# WRONG — $LATEST gets expanded by the shell before AWS ever sees it
+--log-stream-name "2026/06/20/[$LATEST]3b6cfff..."
+
+# RIGHT — single quotes, no shell expansion happens
+--log-stream-name '2026/06/20/[$LATEST]3b6cfff...'
+```
+
+### Triggering a manual run to test
+
+You don't have to wait for the weekly schedule. Trigger a run on
+demand and immediately follow its logs:
+
+```bash
+aws lambda invoke \
+  --function-name tfdriftmonitor \
+  --payload '{"manual": true}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json \
+  --region us-east-1 \
+  && cat response.json
+```
+
+The `response.json` output gives you a one-line summary
+(`{"statusCode": 200, "body": "..."}`) — for the full step-by-step
+detail behind that summary, follow up with `aws logs tail` (or the
+manual two-step approach above) right after.
+
+
+
+- [ ] `lambda/handler.py` + `lambda/notifier.py` — application entry point
+- [ ] Test fixtures + unit tests for the version-diff and HCL parsing logic
+- [ ] `preflight.py` — role + code integrity checking, JIT permission grant/revoke
+- [ ] `incident.py` — tamper response (silent revoke, out-of-band alert)
+- [ ] `prod.yml` — approval-gated production pipeline
+- [ ] bandit, pip-audit, gitleaks layered onto the existing checkov-based `dev.yml`
+- [ ] PR template + branch protection rules
+- [ ] Negative test proving tamper detection actually works
+- [ ] Remote Terraform state with locking (currently local state — see TROUBLESHOOTING.md for the risk this carries)
+- [ ] Windows PowerShell build script (`scripts/build.ps1`) for local
+      `terraform apply` on Windows. Not required — the actual pipeline
+      runs on Linux GitHub Actions runners. The `build_script` Terraform
+      variable already supports swapping this in once built, with no
+      changes needed elsewhere.
+- [ ] Multi-vendor AI model support (OpenAI, Gemini) — deliberately deferred, Claude-only for now
+- [ ] SES sender migrated to a verified custom domain (cosmetic, not a security requirement)
+
+---
+
+## See also
+
+- `TROUBLESHOOTING.md` — known gotchas hit during real setup (state loss, OIDC trust issues, email privacy, hidden dotfiles)
+- `terraform-repos-example.md` — repo configuration examples, single repo through org-wide multi-repo setups
