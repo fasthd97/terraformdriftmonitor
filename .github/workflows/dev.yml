@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@master
@@ -41,4 +41,3 @@ jobs:
           # permissions boundary's wildcard resource scope).
           # Once findings are triaged, flip this to false to enforce.
           soft_fail: true
-
