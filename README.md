@@ -355,7 +355,55 @@ manual two-step approach above) right after.
 
 ---
 
-## See also
+## Known scaling limitations (honest, not yet addressed)
+
+The current design works well for a small-to-moderate number of
+repos (tens, maybe low hundreds). It does **not** scale to enterprise
+fleets (thousands of repos) as-is — and importantly, the AI changelog
+cache (S3-based) is **not** the part that breaks. Two unrelated things
+would break first:
+
+### 1. Repo config storage hits a hard size ceiling
+
+The full repo list is stored as one JSON blob in a single SSM
+parameter. SSM Parameter Store caps out around 8KB per parameter
+even on the "advanced" tier. A list of a few thousand repo entries
+(each with name, repo path, branch, paths array, token reference)
+would exceed that — not a performance issue, a hard wall the config
+simply wouldn't fit through.
+
+**Real fix:** move repo configuration to something built for this —
+DynamoDB, or even just one S3 object per repo instead of one giant
+blob. SSM was the right choice for the current scale; it isn't at
+enterprise scale.
+
+### 2. The execution model is sequential, not parallel
+
+One Lambda invocation processes every configured repo in a loop,
+within a single execution. Even ignoring AI calls entirely, a few
+thousand repos at a couple seconds of GitHub API latency each adds
+up to hours of sequential work — far past Lambda's hard 15-minute
+maximum, regardless of any timeout tuning.
+
+**Real fix:** a fan-out architecture — a dispatcher that pushes one
+queue message per repo (e.g. SQS), consumed by a pool of *concurrent*
+worker Lambdas, rather than one Lambda doing everything in a loop.
+
+### What doesn't need to change
+
+The S3-based AI changelog cache scales fine as-is. S3 has no
+meaningful concurrency ceiling for this access pattern (exact-key
+read/write), and cache hits stay cheap and instant regardless of how
+many repos or workers are asking — see "How AI changelog costs
+actually scale" above for why repo count was never the cost driver
+in the first place.
+
+**Not built now, deliberately** — this is a genuinely different
+architecture, not a tuning change, and out of scope for the current
+timeline. Documenting the real bottlenecks precisely now so the next
+iteration doesn't have to rediscover them from scratch.
+
+
 
 - `TROUBLESHOOTING.md` — known gotchas hit during real setup (state loss, OIDC trust issues, email privacy, hidden dotfiles)
 - `terraform-repos-example.md` — repo configuration examples, single repo through org-wide multi-repo setups
