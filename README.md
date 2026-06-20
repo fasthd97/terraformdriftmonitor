@@ -165,7 +165,70 @@ still fit.
 
 ---
 
-## Checking CloudWatch logs
+## How AI changelog costs actually scale
+
+**The short version: cost scales with the number of distinct
+`(provider, major-version-boundary)` combinations across your fleet —
+not with the number of repos you monitor.**
+
+This surprises people at first, so here's the mechanism in detail.
+
+### The cache key is the whole story
+
+`lambda/checks/ai_changelog.py` caches every AI extraction result in
+S3, keyed by **provider + version only**:
+
+```
+changelog-analysis/hashicorp-aws-6.0.0.json
+```
+
+Notice what's *not* in that key: which repo asked for it. That one
+design choice is what decouples cost from repo count.
+
+### Worked example — 10 repos, same provider
+
+| Step | What happens | AI call? | Why |
+|---|---|---|---|
+| Repo 1 checked, pinned `aws ~> 5.0`, CRITICAL finding | Cache miss for `hashicorp/aws@6.0.0` | **Yes — 1 call** | First time this exact question has been asked |
+| Repo 2 checked, also pinned `aws ~> 5.0` | Cache **hit** for the same key | No | Identical question, already answered |
+| Repo 3 through Repo 10, same situation | Cache **hit**, every time | No | Same as above |
+| **Total for all 10 repos** | | **1 AI call** | Adding repos 2-10 cost nothing extra |
+
+### What actually *does* trigger a new call
+
+| Situation | New AI calls | Why |
+|---|---|---|
+| 10 repos, all on `aws ~> 5.0` | 1 | Same cache key for all 10 |
+| 10 repos, each on a *different* provider (aws, azurerm, google...) hitting CRITICAL | Up to 10 | Each provider is a genuinely different question |
+| 10 repos all on `aws`, but spread across different pinned majors (some `~>3.0`, some `~>4.0`, some `~>5.0`) | Up to 3 | One call per distinct major-version boundary crossed — not per repo |
+| Same 10 repos, checked again next scheduled run, nothing changed | 0 | Still cached from before |
+| AWS eventually ships `7.0.0` someday | 1 (whenever that actually happens) | A genuinely new question — unrelated to how many repos you have |
+
+### The actual rule
+
+Cost is driven by **how many distinct "what changed going from major
+version X to X+1" questions exist** across everything you monitor —
+not by how many places are asking that same question. An organization
+with 50 repos that mostly standardize on similar provider version
+ranges will see this specific cost stay close to flat as they add more
+repos, since most additions just produce cache hits, not new API calls.
+
+### Real cost per call, for reference
+
+Pricing for `claude-sonnet-4-6` (current as of this writing — check
+[Anthropic's pricing page](https://www.anthropic.com/pricing) for
+current rates) is $3 per million input tokens, $15 per million output
+tokens.
+
+| Scenario | Rough cost per call |
+|---|---|
+| Typical release (few or no breaking changes) | ~$0.02 |
+| Large release with many breaking changes (e.g. a major version bump like AWS provider 6.0.0) | ~$0.14 |
+
+Both numbers are **one-time costs per provider+version**, not
+per-repo, per-run costs — see the tables above for why.
+
+
 
 Every run — scheduled or manual — writes detailed step-by-step output
 to CloudWatch. This is where you actually see *why* a run found what
