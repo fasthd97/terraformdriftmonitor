@@ -1,0 +1,40 @@
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored.
+# Terraform recommends committing it so everyone gets the same
+# provider versions on `terraform init` - this was confirmed by
+# Terraform's own output during the bootstrap apply earlier.
+ 
+# Build output - regenerated on every deploy
+dist/
+ 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+ 
+# OS files
+.DS_Store
+Thumbs.db
+ 
+# Local test output
+response.json
+ 
+# Editor
+.vscode/
+.idea/
+*.swp
+ 

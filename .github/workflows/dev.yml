@@ -1,0 +1,44 @@
+################################################################################
+# .github/workflows/dev.yml
+# ---------------------------
+# MINIMAL SKELETON — intentionally small to get a real, green run in the
+# Actions tab as fast as possible. Everything else (preflight, bandit,
+# pip-audit, gitleaks, AURORA tamper response, prod approval gate) layers
+# on top of this once it's proven working.
+#
+# Why checkov specifically for the required security step:
+# This project is fundamentally about Terraform. checkov scans the real
+# Terraform in this repo (terraform/bootstrap, terraform/lambda) for
+# security misconfigurations — not a token gesture against a toy example.
+################################################################################
+
+name: dev
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch: {} # manual trigger button in the Actions tab
+
+jobs:
+  security-scan:
+    name: Checkov - Terraform security scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          # soft_fail lets us see real findings on the first runs without
+          # blocking every push while we're still triaging what's a real
+          # issue vs an intentional, documented design choice (e.g. the
+          # permissions boundary's wildcard resource scope).
+          # Once findings are triaged, flip this to false to enforce.
+          soft_fail: true
+
