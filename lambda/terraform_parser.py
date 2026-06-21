@@ -192,6 +192,13 @@ def parse_resource_types(hcl_content: str, filename: str = "unknown") -> set:
             # inject internal metadata keys alongside real resource types.
             if resource_type.startswith("__") and resource_type.endswith("__"):
                 continue
+            # Same stray-quote fix as parse_providers() above — hcl2 can
+            # leave literal quote characters attached to the key string
+            # (e.g. '"aws_instance"' instead of 'aws_instance'). Caught
+            # via a real failing unit test, not the original live-run
+            # bug this mirrors — that one was in parse_providers only;
+            # this function was missed at the time.
+            resource_type = resource_type.strip('"').strip("'")
             resource_types.add(resource_type)
 
     return resource_types
