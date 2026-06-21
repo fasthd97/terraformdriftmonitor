@@ -120,6 +120,11 @@ data "archive_file" "lambda_zip" {
 # lambda-infra's role, but can never modify that role itself.
 ################################################################################
 
+#checkov:skip=CKV_AWS_50:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_50 — aws_lambda_function.drift_monitor". No multi-service call chain to trace; full execution logging already in CloudWatch.
+#checkov:skip=CKV_AWS_117:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_117 — aws_lambda_function.drift_monitor". Requires public internet egress (GitHub, HashiCorp, Anthropic); no private resources to isolate.
+#checkov:skip=CKV_AWS_116:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_116 — aws_lambda_function.drift_monitor". Failure visibility already covered by existing CloudWatch alarms via a different mechanism.
+#checkov:skip=CKV_AWS_173:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_173 — aws_lambda_function.drift_monitor". Environment variables hold SSM parameter paths, not secret values.
+#checkov:skip=CKV_AWS_272:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_272 — aws_lambda_function.drift_monitor". Single trusted publisher (this repo's own pipeline) - no multi-publisher scenario to distinguish.
 resource "aws_lambda_function" "drift_monitor" {
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = var.project_name
@@ -130,6 +135,15 @@ resource "aws_lambda_function" "drift_monitor" {
 
   timeout     = var.lambda_timeout_seconds
   memory_size = var.lambda_memory_mb
+
+  # Capped at 2: one scheduled run + one manual run can coexist without
+  # either throttling the other, while still hard-limiting runaway
+  # concurrency (e.g. a misconfigured trigger firing repeatedly). A
+  # cap of 1 was considered but rejected — it would silently throttle
+  # a scheduled run if a manual invocation happened to overlap with it,
+  # and EventBridge's async retries could exhaust without ever
+  # producing a visible failure beyond the throttle count itself.
+  reserved_concurrent_executions = 2
 
   environment {
     variables = {

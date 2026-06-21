@@ -43,12 +43,14 @@ jobs:
         with:
           directory: terraform/
           framework: terraform
-          # soft_fail lets us see real findings on the first runs without
-          # blocking every push while we're still triaging what's a real
-          # issue vs an intentional, documented design choice (e.g. the
-          # permissions boundary's wildcard resource scope).
-          # Once findings are triaged, flip this to false to enforce.
-          soft_fail: true
+          # soft_fail was true during initial triage, to see real findings
+          # without blocking every push. All 35 findings now have an
+          # explicit disposition (4 remediated, 31 risk-accepted with
+          # documented rationale) - see SECURITY-FINDINGS.md and the
+          # inline #checkov:skip comments throughout terraform/. With
+          # triage complete, this now enforces that any NEW, un-dispositioned
+          # finding actually fails the pipeline rather than passing silently.
+          soft_fail: false
 
   deploy:
     name: Deploy Lambda (terraform/lambda-code)

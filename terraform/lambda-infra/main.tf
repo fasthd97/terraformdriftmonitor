@@ -71,6 +71,11 @@ data "aws_ssm_parameter" "terraform_repos" {
 # access pattern (the Lambda's own role vs. the GitHub deploy role).
 ################################################################################
 
+#checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.analysis_cache". Contents are a cached copy of public changelog data; no confidentiality requirement.
+#checkov:skip=CKV_AWS_21:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_21 — aws_s3_bucket.analysis_cache". Cache entries are deterministically regenerable; versioning provides no recovery value.
+#checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.analysis_cache". Access already restricted by IAM to the Lambda execution role only.
+#checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.analysis_cache". Regenerable from public source data, though regeneration has a real API cost.
+#checkov:skip=CKV2_AWS_61:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_61 — aws_s3_bucket.analysis_cache". A lifecycle rule would directly contradict the indefinite-cache feature (ai_changelog_cache_ttl_hours = 0).
 resource "aws_s3_bucket" "analysis_cache" {
   # Account ID alone guarantees global uniqueness. Unlike bootstrap's
   # deployments bucket, this bucket only ever holds cached summaries of
@@ -135,7 +140,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "analysis_cache" {
 ################################################################################
 
 resource "aws_sns_topic" "drift_findings" {
-  name = "${var.project_name}-drift-findings"
+  name              = "${var.project_name}-drift-findings"
+  kms_master_key_id = "alias/aws/sns"
 
   tags = {
     Project = var.project_name
@@ -295,6 +301,8 @@ resource "aws_iam_role_policy_attachment" "sns_publish" {
 # control over retention — without this, logs accumulate forever.
 ################################################################################
 
+#checkov:skip=CKV_AWS_158:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_158 — aws_cloudwatch_log_group.drift_monitor". No secrets are ever logged by the application code; IAM already scopes log access.
+#checkov:skip=CKV_AWS_338:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_338 — aws_cloudwatch_log_group.drift_monitor". 30-day retention kept deliberately for cost; increase log_retention_days if longer retention is needed.
 resource "aws_cloudwatch_log_group" "drift_monitor" {
   name              = "/aws/lambda/${var.project_name}"
   retention_in_days = var.log_retention_days

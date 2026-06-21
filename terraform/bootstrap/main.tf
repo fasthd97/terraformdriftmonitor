@@ -25,6 +25,15 @@
 
 data "aws_caller_identity" "current" {}
 
+# Resolves the actual KMS key behind SSM's AWS-managed alias. Needed
+# now that the deploy role reads SecureString SSM parameters directly
+# during `terraform plan`/`apply` in lambda-code/ (the aws_ssm_parameter
+# data source defaults with_decryption to true, which requires
+# kms:Decrypt even though this config never reads the actual .value).
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
+}
+
 
 ################################################################################
 # 1. OIDC PROVIDER
@@ -82,6 +91,11 @@ resource "aws_iam_openid_connect_provider" "github" {
 # This must be defined before the role, since the role references it.
 ################################################################################
 
+#checkov:skip=CKV_AWS_108:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_108 — data.aws_iam_policy_document.deploy_role_boundary". Wildcard is on sns:ListTopics, which has no resource-scoped form in the AWS API.
+#checkov:skip=CKV_AWS_109:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_109 — data.aws_iam_policy_document.deploy_role_boundary". Same root cause as CKV_AWS_108 above.
+#checkov:skip=CKV_AWS_110:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_110 — data.aws_iam_policy_document.deploy_role_boundary". This statement grants no privilege-escalation-capable action.
+#checkov:skip=CKV_AWS_111:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_111 — data.aws_iam_policy_document.deploy_role_boundary". The flagged action is read-only (sns:ListTopics), not a write action.
+#checkov:skip=CKV_AWS_356:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_356 — data.aws_iam_policy_document.deploy_role_boundary". sns:ListTopics does not support resource-level restriction at all.
 data "aws_iam_policy_document" "deploy_role_boundary" {
   statement {
     sid    = "MaximumPossiblePermissionsCeiling"
@@ -101,11 +115,20 @@ data "aws_iam_policy_document" "deploy_role_boundary" {
       "lambda:UntagResource",
       "lambda:AddPermission",
       "lambda:GetPolicy",
+      "lambda:ListVersionsByFunction",
+      "lambda:ListTags",
+      "lambda:GetFunctionCodeSigningConfig",
       "events:PutRule",
       "events:DescribeRule",
       "events:ListTagsForResource",
       "events:PutTargets",
       "events:ListTargetsByRule",
+      "sns:ListTopics",
+      "sns:GetTopicAttributes",
+      "sns:ListTagsForResource",
+      "s3:GetBucketWebsite",
+      "ssm:GetParameter",
+      "kms:Decrypt",
       "iam:GetRole",
       "iam:GetRolePolicy",
       "iam:ListRolePolicies",
@@ -300,6 +323,19 @@ data "aws_iam_policy_document" "github_actions_deploy_permissions" {
       "lambda:UntagResource",
       "lambda:AddPermission",
       "lambda:GetPolicy",
+      # Three more added after a real failed pipeline run + confirming
+      # against AWS's own documented permission set for "view Lambda
+      # function configuration details" (re:Post knowledge center),
+      # rather than guess at each one individually:
+      "lambda:ListVersionsByFunction", # confirmed via the actual error
+      "lambda:ListTags",                # same describe-vs-write split
+                                          # pattern as every other
+                                          # service hit today (SNS, S3)
+      "lambda:GetFunctionCodeSigningConfig", # provider may call this
+                                               # even without code
+                                               # signing configured —
+                                               # added now rather than
+                                               # wait for a 4th failure
     ]
     # Same function ARN pattern already used for UpdateFunctionCode above.
     # Deliberately EXCLUDES lambda:DeleteFunction and RemovePermission —
@@ -326,6 +362,100 @@ data "aws_iam_policy_document" "github_actions_deploy_permissions" {
     resources = [
       "arn:aws:events:*:*:rule/${var.project_name}*"
     ]
+  }
+
+  # --- Gap fix: permissions for lambda-code's cross-root data source
+  # lookups, traced from a real failed pipeline run rather than fully
+  # anticipated up front. Only ReadLambdaExecutionRole (above) was
+  # added when these data sources were first written — the other four
+  # lookups (SNS topic, S3 bucket, three SSM parameters) were missed
+  # entirely until terraform/lambda-code/main.tf's `data` blocks were
+  # re-traced exhaustively, one by one, against this policy.
+
+  statement {
+    sid    = "ReadDriftFindingsTopic"
+    effect = "Allow"
+    actions = [
+      "sns:ListTopics",
+    ]
+    # SNS has no "get topic by name" API — data "aws_sns_topic" must
+    # enumerate all topics to find a name match, which is why this
+    # action genuinely cannot be scoped to a specific resource ARN
+    # the way every other statement in this policy is. This is an
+    # inherent limitation of AWS's List* APIs, not a deliberate
+    # broadening of this role's access.
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ReadDriftFindingsTopicAttributes"
+    effect = "Allow"
+    actions = [
+      "sns:GetTopicAttributes",
+      "sns:ListTagsForResource",
+    ]
+    # Follow-up calls the data source makes AFTER finding the topic via
+    # ListTopics above — to populate its attributes and tags. Unlike
+    # ListTopics, both of these DO support resource-level scoping, so
+    # they're properly scoped here rather than left wildcarded. Found
+    # incrementally across two separate failed pipeline runs — each
+    # fix revealed the next API call this one data source actually
+    # makes, rather than all of them being visible up front.
+    resources = [
+      "arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${var.project_name}-drift-findings"
+    ]
+  }
+
+  statement {
+    sid    = "ReadAnalysisCacheBucketMetadata"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucketLocation",
+      "s3:ListBucket",
+      "s3:GetBucketWebsite", # confirmed via a complete TF_LOG=DEBUG
+                              # run against the real provider — the
+                              # aws_s3_bucket data source probes this
+                              # as part of populating its full
+                              # attribute set, even though this bucket
+                              # has no website config (expected 404,
+                              # but the CALL ITSELF still needs this
+                              # permission or it's a 403 instead)
+    ]
+    # Read-only metadata lookup for data "aws_s3_bucket" — NOT the same
+    # as the GetObject/PutObject access the LAMBDA's own role has via
+    # lambda-infra/. This role can confirm the bucket exists; it can
+    # never read or write objects inside it.
+    resources = [
+      "arn:aws:s3:::${var.project_name}-analysis-cache-${data.aws_caller_identity.current.account_id}"
+    ]
+  }
+
+  statement {
+    sid    = "ReadApplicationSecretsMetadata"
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+    ]
+    # Same three parameters lambda-infra's OWN role can read at
+    # runtime — but this is a COMPLETELY DIFFERENT identity (the
+    # deploy role, not the Lambda execution role) needing the same
+    # read for a different reason: confirming these parameters exist
+    # during `terraform plan`/`apply`, not using their values at runtime.
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/anthropic-api-key",
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/github-token",
+      "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/terraform-repos",
+    ]
+  }
+
+  statement {
+    sid       = "DecryptApplicationSecretsMetadata"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    # Same key, same scoping pattern already used for the Lambda's own
+    # role in lambda-infra/ — never wildcarded, same lesson applied
+    # consistently rather than re-learned.
+    resources = [data.aws_kms_alias.ssm.target_key_arn]
   }
 }
 
@@ -359,6 +489,10 @@ resource "random_id" "deployments_suffix" {
   byte_length = 4 # produces an 8-character hex string
 }
 
+#checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.deployments". Contents are already public (build artifacts from this repo).
+#checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.deployments". No event consumer exists for this bucket's activity.
+#checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.deployments". Access already restricted by IAM to a single known identity.
+#checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.deployments". Contents are fully regenerable on demand.
 resource "aws_s3_bucket" "deployments" {
   bucket = "deploy-${random_id.deployments_suffix.hex}"
 
@@ -414,6 +548,13 @@ resource "aws_s3_bucket_lifecycle_configuration" "deployments" {
     noncurrent_version_expiration {
       noncurrent_days = 90
     }
+
+    # Cleans up storage cost from any multipart upload that failed or
+    # was abandoned partway through, rather than leaving incomplete
+    # parts billed indefinitely.
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
   }
 }
 
@@ -451,6 +592,11 @@ resource "random_id" "lambda_state_suffix" {
   byte_length = 4
 }
 
+#checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.lambda_state". No secrets stored in this state; verified directly against state contents.
+#checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.lambda_state". No event consumer exists; Terraform's own locking already prevents concurrent modification.
+#checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.lambda_state". CloudTrail already attributes all access by identity.
+#checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.lambda_state". Already mitigated by versioning, which is enabled on this bucket.
+#checkov:skip=CKV2_AWS_61:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_61 — aws_s3_bucket.lambda_state". A lifecycle rule would undermine state-recovery capability, not improve it.
 resource "aws_s3_bucket" "lambda_state" {
   bucket = "lambda-state-${random_id.lambda_state_suffix.hex}"
 
@@ -561,7 +707,8 @@ resource "aws_iam_role_policy_attachment" "github_actions_ses" {
 ################################################################################
 
 resource "aws_sns_topic" "pipeline_alerts" {
-  name = "${var.project_name}-pipeline-alerts"
+  name              = "${var.project_name}-pipeline-alerts"
+  kms_master_key_id = "alias/aws/sns" # AWS-managed key, free, one line
 
   tags = {
     Project = var.project_name
@@ -621,6 +768,7 @@ resource "aws_iam_role_policy_attachment" "github_actions_sns" {
 # to the placeholder text.
 # -----------------------------------------------------------------
 
+#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.anthropic_api_key". IAM read-access scoping is the control protecting this value, not key ownership.
 resource "aws_ssm_parameter" "anthropic_api_key" {
   name        = "/${var.project_name}/anthropic-api-key"
   type        = "SecureString"
@@ -636,6 +784,7 @@ resource "aws_ssm_parameter" "anthropic_api_key" {
   }
 }
 
+#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.github_token". Same IAM-scoping reasoning as anthropic_api_key above.
 resource "aws_ssm_parameter" "github_token" {
   name        = "/${var.project_name}/github-token"
   type        = "SecureString"
@@ -651,6 +800,7 @@ resource "aws_ssm_parameter" "github_token" {
   }
 }
 
+#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.terraform_repos_config". Not a credential - reveals only which repos are monitored.
 resource "aws_ssm_parameter" "terraform_repos_config" {
   name        = "/${var.project_name}/terraform-repos"
   type        = "SecureString"
@@ -676,6 +826,7 @@ resource "aws_ssm_parameter" "terraform_repos_config" {
 # OUTSIDE of Terraform — i.e. tampered with.
 # -----------------------------------------------------------------
 
+#checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.role_integrity_hash". Write access (not encryption) is the relevant control - verified ssm:PutParameter is absent from the deploy role's policy and boundary.
 resource "aws_ssm_parameter" "role_integrity_hash" {
   name        = "/${var.project_name}/role-integrity-hash"
   type        = "String" # not secret — a hash reveals nothing about the policy itself
@@ -716,6 +867,7 @@ locals {
   simulate_policy_name = "${var.project_name}-jit-simulate"
 }
 
+#checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.simulate_policy_name". Same write-access verification as role_integrity_hash above; value is a non-secret policy name.
 resource "aws_ssm_parameter" "simulate_policy_name" {
   name        = "/${var.project_name}/jit-simulate-policy-name"
   type        = "String"
