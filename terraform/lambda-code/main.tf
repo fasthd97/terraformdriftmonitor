@@ -120,12 +120,12 @@ data "archive_file" "lambda_zip" {
 # lambda-infra's role, but can never modify that role itself.
 ################################################################################
 
-#checkov:skip=CKV_AWS_50:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_50 — aws_lambda_function.drift_monitor". No multi-service call chain to trace; full execution logging already in CloudWatch.
-#checkov:skip=CKV_AWS_117:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_117 — aws_lambda_function.drift_monitor". Requires public internet egress (GitHub, HashiCorp, Anthropic); no private resources to isolate.
-#checkov:skip=CKV_AWS_116:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_116 — aws_lambda_function.drift_monitor". Failure visibility already covered by existing CloudWatch alarms via a different mechanism.
-#checkov:skip=CKV_AWS_173:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_173 — aws_lambda_function.drift_monitor". Environment variables hold SSM parameter paths, not secret values.
-#checkov:skip=CKV_AWS_272:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_272 — aws_lambda_function.drift_monitor". Single trusted publisher (this repo's own pipeline) - no multi-publisher scenario to distinguish.
 resource "aws_lambda_function" "drift_monitor" {
+  #checkov:skip=CKV_AWS_50:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_50 — aws_lambda_function.drift_monitor". No multi-service call chain to trace; full execution logging already in CloudWatch.
+  #checkov:skip=CKV_AWS_117:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_117 — aws_lambda_function.drift_monitor". Requires public internet egress (GitHub, HashiCorp, Anthropic); no private resources to isolate.
+  #checkov:skip=CKV_AWS_116:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_116 — aws_lambda_function.drift_monitor". Failure visibility already covered by existing CloudWatch alarms via a different mechanism.
+  #checkov:skip=CKV_AWS_173:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_173 — aws_lambda_function.drift_monitor". Environment variables hold SSM parameter paths, not secret values.
+  #checkov:skip=CKV_AWS_272:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_272 — aws_lambda_function.drift_monitor". Single trusted publisher (this repo's own pipeline) - no multi-publisher scenario to distinguish.
   filename         = data.archive_file.lambda_zip.output_path
   function_name    = var.project_name
   role             = data.aws_iam_role.lambda_execution.arn

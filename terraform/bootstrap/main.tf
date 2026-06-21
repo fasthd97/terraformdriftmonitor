@@ -100,12 +100,12 @@ resource "aws_iam_openid_connect_provider" "github" {
 # .github/workflows/dev.yml instead, which was verified to work.
 # Comments kept here for explanatory value even though they aren't
 # what's doing the suppressing.
-#checkov:skip=CKV_AWS_108:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_108 — data.aws_iam_policy_document.deploy_role_boundary". Wildcard is on sns:ListTopics, which has no resource-scoped form in the AWS API.
-#checkov:skip=CKV_AWS_109:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_109 — data.aws_iam_policy_document.deploy_role_boundary". Same root cause as CKV_AWS_108 above.
-#checkov:skip=CKV_AWS_110:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_110 — data.aws_iam_policy_document.deploy_role_boundary". This statement grants no privilege-escalation-capable action.
-#checkov:skip=CKV_AWS_111:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_111 — data.aws_iam_policy_document.deploy_role_boundary". The flagged action is read-only (sns:ListTopics), not a write action.
-#checkov:skip=CKV_AWS_356:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_356 — data.aws_iam_policy_document.deploy_role_boundary". sns:ListTopics does not support resource-level restriction at all.
 data "aws_iam_policy_document" "deploy_role_boundary" {
+  #checkov:skip=CKV_AWS_108:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_108 — data.aws_iam_policy_document.deploy_role_boundary". Wildcard is on sns:ListTopics, which has no resource-scoped form in the AWS API.
+  #checkov:skip=CKV_AWS_109:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_109 — data.aws_iam_policy_document.deploy_role_boundary". Same root cause as CKV_AWS_108 above.
+  #checkov:skip=CKV_AWS_110:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_110 — data.aws_iam_policy_document.deploy_role_boundary". This statement grants no privilege-escalation-capable action.
+  #checkov:skip=CKV_AWS_111:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_111 — data.aws_iam_policy_document.deploy_role_boundary". The flagged action is read-only (sns:ListTopics), not a write action.
+  #checkov:skip=CKV_AWS_356:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_356 — data.aws_iam_policy_document.deploy_role_boundary". sns:ListTopics does not support resource-level restriction at all.
   statement {
     sid    = "MaximumPossiblePermissionsCeiling"
     effect = "Allow"
@@ -498,11 +498,11 @@ resource "random_id" "deployments_suffix" {
   byte_length = 4 # produces an 8-character hex string
 }
 
-#checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.deployments". Contents are already public (build artifacts from this repo).
-#checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.deployments". No event consumer exists for this bucket's activity.
-#checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.deployments". Access already restricted by IAM to a single known identity.
-#checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.deployments". Contents are fully regenerable on demand.
 resource "aws_s3_bucket" "deployments" {
+  #checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.deployments". Contents are already public (build artifacts from this repo).
+  #checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.deployments". No event consumer exists for this bucket's activity.
+  #checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.deployments". Access already restricted by IAM to a single known identity.
+  #checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.deployments". Contents are fully regenerable on demand.
   bucket = "deploy-${random_id.deployments_suffix.hex}"
 
   tags = {
@@ -601,12 +601,12 @@ resource "random_id" "lambda_state_suffix" {
   byte_length = 4
 }
 
-#checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.lambda_state". No secrets stored in this state; verified directly against state contents.
-#checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.lambda_state". No event consumer exists; Terraform's own locking already prevents concurrent modification.
-#checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.lambda_state". CloudTrail already attributes all access by identity.
-#checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.lambda_state". Already mitigated by versioning, which is enabled on this bucket.
-#checkov:skip=CKV2_AWS_61:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_61 — aws_s3_bucket.lambda_state". A lifecycle rule would undermine state-recovery capability, not improve it.
 resource "aws_s3_bucket" "lambda_state" {
+  #checkov:skip=CKV_AWS_145:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_145 — aws_s3_bucket.lambda_state". No secrets stored in this state; verified directly against state contents.
+  #checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.lambda_state". No event consumer exists; Terraform's own locking already prevents concurrent modification.
+  #checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.lambda_state". CloudTrail already attributes all access by identity.
+  #checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.lambda_state". Already mitigated by versioning, which is enabled on this bucket.
+  #checkov:skip=CKV2_AWS_61:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_61 — aws_s3_bucket.lambda_state". A lifecycle rule would undermine state-recovery capability, not improve it.
   bucket = "lambda-state-${random_id.lambda_state_suffix.hex}"
 
   tags = {
@@ -777,8 +777,8 @@ resource "aws_iam_role_policy_attachment" "github_actions_sns" {
 # to the placeholder text.
 # -----------------------------------------------------------------
 
-#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.anthropic_api_key". IAM read-access scoping is the control protecting this value, not key ownership.
 resource "aws_ssm_parameter" "anthropic_api_key" {
+  #checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.anthropic_api_key". IAM read-access scoping is the control protecting this value, not key ownership.
   name        = "/${var.project_name}/anthropic-api-key"
   type        = "SecureString"
   value       = "PLACEHOLDER-replace-via-aws-ssm-put-parameter"
@@ -793,8 +793,8 @@ resource "aws_ssm_parameter" "anthropic_api_key" {
   }
 }
 
-#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.github_token". Same IAM-scoping reasoning as anthropic_api_key above.
 resource "aws_ssm_parameter" "github_token" {
+  #checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.github_token". Same IAM-scoping reasoning as anthropic_api_key above.
   name        = "/${var.project_name}/github-token"
   type        = "SecureString"
   value       = "PLACEHOLDER-replace-via-aws-ssm-put-parameter"
@@ -809,8 +809,8 @@ resource "aws_ssm_parameter" "github_token" {
   }
 }
 
-#checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.terraform_repos_config". Not a credential - reveals only which repos are monitored.
 resource "aws_ssm_parameter" "terraform_repos_config" {
+  #checkov:skip=CKV_AWS_337:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_337 — aws_ssm_parameter.terraform_repos_config". Not a credential - reveals only which repos are monitored.
   name        = "/${var.project_name}/terraform-repos"
   type        = "SecureString"
   value       = jsonencode({ repos = [] })
@@ -835,8 +835,8 @@ resource "aws_ssm_parameter" "terraform_repos_config" {
 # OUTSIDE of Terraform — i.e. tampered with.
 # -----------------------------------------------------------------
 
-#checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.role_integrity_hash". Write access (not encryption) is the relevant control - verified ssm:PutParameter is absent from the deploy role's policy and boundary.
 resource "aws_ssm_parameter" "role_integrity_hash" {
+  #checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.role_integrity_hash". Write access (not encryption) is the relevant control - verified ssm:PutParameter is absent from the deploy role's policy and boundary.
   name        = "/${var.project_name}/role-integrity-hash"
   type        = "String" # not secret — a hash reveals nothing about the policy itself
   value       = sha256(data.aws_iam_policy_document.github_actions_deploy_permissions.json)
@@ -876,8 +876,8 @@ locals {
   simulate_policy_name = "${var.project_name}-jit-simulate"
 }
 
-#checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.simulate_policy_name". Same write-access verification as role_integrity_hash above; value is a non-secret policy name.
 resource "aws_ssm_parameter" "simulate_policy_name" {
+  #checkov:skip=CKV2_AWS_34:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_34 — aws_ssm_parameter.simulate_policy_name". Same write-access verification as role_integrity_hash above; value is a non-secret policy name.
   name        = "/${var.project_name}/jit-simulate-policy-name"
   type        = "String"
   value       = local.simulate_policy_name
