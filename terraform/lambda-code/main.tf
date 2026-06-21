@@ -82,6 +82,20 @@ resource "null_resource" "build_lambda" {
   triggers = {
     source_hash       = local.lambda_source_hash
     requirements_hash = filemd5("${path.module}/../../lambda/requirements.txt")
+
+    # ALWAYS forces a rebuild, on every single apply, regardless of
+    # whether source_hash/requirements_hash changed. This is the only
+    # root in the project where that's correct: this root is applied by
+    # a FRESH, EMPTY GitHub Actions runner every time, never the same
+    # machine twice. State (now correctly remote, in S3) can say "the
+    # build already happened" — but that was only ever true on whatever
+    # machine actually ran build.sh. A new runner has no dist/package
+    # folder regardless of what the trigger hashes say, so skipping the
+    # rebuild here means archive_file has nothing to zip. The hash-based
+    # skip logic genuinely only makes sense for a human re-applying
+    # repeatedly from the same machine — which never happens for this
+    # particular root.
+    always_run = timestamp()
   }
 
   provisioner "local-exec" {
