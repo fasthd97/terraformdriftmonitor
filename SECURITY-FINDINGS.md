@@ -2,7 +2,7 @@
 
 **Project:** terraformdriftmonitor
 **Scan tool:** Checkov, against `terraform/bootstrap/`, `terraform/lambda-infra/`, `terraform/lambda-code/`
-**Total findings:** 35 (4 remediated in code, 31 risk-accepted with documented rationale below)
+**Total findings:** 36 (4 remediated in code, 32 risk-accepted with documented rationale below). One finding (CKV2_AWS_62 on `aws_s3_bucket.analysis_cache`) was identified after the initial 35-finding triage, via a real pipeline run that still failed after the other 31 were correctly dispositioned — added here with the same reasoning already established for the other two buckets sharing this check.
 **Reviewed:** 2026-06-21
 
 ## Purpose
@@ -377,6 +377,21 @@ need to catch.
 `aws_s3_bucket.deployments` above, with the additional point that Terraform's locking mechanism
 already addresses the most likely use case for such an alert.
 
+### CKV2_AWS_62 — `aws_s3_bucket.analysis_cache`
+
+**Check:** same requirement as CKV2_AWS_62 on `aws_s3_bucket.deployments` and `aws_s3_bucket.lambda_state` above — S3 event notifications.
+
+**Analysis:** evaluated independently because this bucket's content
+(cached AI changelog analysis) and access pattern (the Lambda
+execution role, not the deploy role) differ from both other buckets.
+The conclusion is the same regardless: nothing in this project
+consumes bucket-activity events for any of the three S3 buckets, and
+this bucket specifically has no monitoring or automation downstream
+that would act on a "cache entry written" event.
+
+**Decision:** risk-accepted, on the same no-event-consumer basis as
+CKV2_AWS_62 on `aws_s3_bucket.deployments` and `aws_s3_bucket.lambda_state` above.
+
 ### CKV_AWS_18 — `aws_s3_bucket.deployments`
 
 **Check:** S3 bucket should have access logging enabled.
@@ -594,8 +609,8 @@ increase `log_retention_days` in `terraform/lambda-infra/variables.tf`
 | Disposition | Count |
 |---|---|
 | Remediated in code | 4 |
-| Risk-accepted, documented above | 31 |
-| **Total findings** | **35** |
+| Risk-accepted, documented above | 32 |
+| **Total findings** | **36** |
 
 `soft_fail` in `.github/workflows/dev.yml` is set to `false` following
 this triage — all findings have an explicit, independently-evaluated

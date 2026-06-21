@@ -77,6 +77,7 @@ resource "aws_s3_bucket" "analysis_cache" {
   #checkov:skip=CKV_AWS_18:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_18 — aws_s3_bucket.analysis_cache". Access already restricted by IAM to the Lambda execution role only.
   #checkov:skip=CKV_AWS_144:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_144 — aws_s3_bucket.analysis_cache". Regenerable from public source data, though regeneration has a real API cost.
   #checkov:skip=CKV2_AWS_61:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_61 — aws_s3_bucket.analysis_cache". A lifecycle rule would directly contradict the indefinite-cache feature (ai_changelog_cache_ttl_hours = 0).
+  #checkov:skip=CKV2_AWS_62:Risk-accepted - see SECURITY-FINDINGS.md, "CKV2_AWS_62 — aws_s3_bucket.analysis_cache". No event consumer exists for this bucket's activity, same as deployments and lambda_state.
   # Account ID alone guarantees global uniqueness. Unlike bootstrap's
   # deployments bucket, this bucket only ever holds cached summaries of
   # PUBLIC Terraform provider changelogs — there's no sensitive data
