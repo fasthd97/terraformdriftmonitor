@@ -90,7 +90,16 @@ resource "aws_iam_openid_connect_provider" "github" {
 #
 # This must be defined before the role, since the role references it.
 ################################################################################
-
+# NOTE: the 5 #checkov:skip comments below document WHY each finding is
+# risk-accepted (see SECURITY-FINDINGS.md). They were tested and did
+# NOT actually suppress these 5 findings when checkov ran against this
+# data "aws_iam_policy_document" block - confirmed by a real failed
+# pipeline run despite the comments being present. The root cause
+# wasn't conclusively identified; the actual suppression for these 5
+# happens at the workflow level via skip_check in
+# .github/workflows/dev.yml instead, which was verified to work.
+# Comments kept here for explanatory value even though they aren't
+# what's doing the suppressing.
 #checkov:skip=CKV_AWS_108:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_108 — data.aws_iam_policy_document.deploy_role_boundary". Wildcard is on sns:ListTopics, which has no resource-scoped form in the AWS API.
 #checkov:skip=CKV_AWS_109:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_109 — data.aws_iam_policy_document.deploy_role_boundary". Same root cause as CKV_AWS_108 above.
 #checkov:skip=CKV_AWS_110:Risk-accepted - see SECURITY-FINDINGS.md, "CKV_AWS_110 — data.aws_iam_policy_document.deploy_role_boundary". This statement grants no privilege-escalation-capable action.

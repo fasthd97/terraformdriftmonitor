@@ -20,9 +20,18 @@ This document is written for a reader with no prior context on this
 project's design discussions — every claim below is self-contained and
 verifiable directly against the codebase.
 
-Each risk-accepted finding is marked inline in the Terraform source
-with a `#checkov:skip=<CHECK_ID>:<short reason>` comment immediately
-above the affected resource, cross-referencing this document.
+Each risk-accepted finding is marked with a `#checkov:skip=<CHECK_ID>:<short
+reason>` comment immediately above the affected resource in the Terraform
+source, cross-referencing this document. Five findings (CKV_AWS_108,
+109, 110, 111, 356 — all against the permissions boundary's `data
+"aws_iam_policy_document"` block) are an exception: when tested,
+inline skip comments on that block did not actually suppress these
+findings — confirmed by a real failed pipeline run despite the
+comments being present and correctly formatted. The exact root cause
+in checkov was not conclusively identified. Their inline comments are
+kept for explanatory value, but the actual, verified-working
+suppression for those five is declared via the `skip_check` parameter
+on the checkov action in `.github/workflows/dev.yml` instead.
 
 ---
 
