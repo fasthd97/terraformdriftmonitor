@@ -41,7 +41,11 @@ EventBridge (schedule)
 
 ## Architecture
 
-![Architecture diagram: deployment/trust boundaries on top, runtime data flow on the bottom](docs/architecture.svg)
+
+Deployment & trust boundaries (top) and runtime data flow (bottom):
+
+[View architecture diagram (PDF)](./architecture.pdf)
+
 
 ### Deployment & trust: three separate Terraform roots
 
