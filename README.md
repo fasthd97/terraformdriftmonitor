@@ -41,6 +41,10 @@ EventBridge (schedule)
 
 ## Architecture
 
+![Architecture diagram: deployment/trust boundaries on top, runtime data flow on the bottom](docs/architecture.svg)
+
+### Deployment & trust: three separate Terraform roots
+
 Three **separate** Terraform roots, deliberately decoupled:
 
 | Root | Applied by | State | Contains |
@@ -61,16 +65,37 @@ Three **separate** Terraform roots, deliberately decoupled:
 
 `.github/workflows/dev.yml` has two jobs:
 
-1. **`security-scan`** — checkov against all Terraform in the repo. Runs on every trigger, including pull requests. Read-only, never touches AWS.
+1. **`security-scan`** — four tools, each covering a different layer. Runs on every trigger, including pull requests. Read-only, never touches AWS.
 2. **`deploy`** — runs `terraform init` / `plan` / `apply` against `terraform/lambda-code/` specifically (never `lambda-infra` or `bootstrap` — the deploy role's permissions don't extend to either, by design, so pointing this job anywhere else would fail on a permissions error rather than silently doing the wrong thing).
 
-**Deploy is skipped on pull requests, deliberately.** Running `terraform apply` against real infrastructure on every PR — including unreviewed ones — would mean unreviewed code could deploy itself. The job has `if: github.event_name != 'pull_request'`; checkov still scans PRs, nothing in `deploy` ever runs against one.
+**The four scanners, and why each one exists rather than relying on just checkov:**
+
+| Tool | What it actually checks | Why it's a separate tool |
+|---|---|---|
+| **checkov** | Terraform infrastructure config — IAM policies, S3/SNS/Lambda settings, etc. See `SECURITY-FINDINGS.md` for the full triage of every finding. | Doesn't see a single line of Python |
+| **bandit** | The Lambda's own Python source (`lambda/`) — common security anti-patterns like shell injection, insecure deserialization, hardcoded credentials | checkov has no visibility into application code at all |
+| **pip-audit** | `lambda/requirements.txt` against known CVE databases | A dependency can be perfectly *configured* and still be a real vulnerability if a known-bad version is pinned — neither of the above tools checks this |
+| **gitleaks** | Full git history (not just the current files) for accidentally committed secrets — API keys, tokens, credentials | Catches something committed and later "removed" — it still lives in history unless the repo itself is rewritten, which none of the other three tools would ever notice |
+
+All four were tested standalone against this exact codebase before being wired into the pipeline — all four came back clean, so all four are a hard fail from the start rather than eased in with `soft_fail` the way checkov needed (checkov had 35 real findings to triage first; these didn't).
+
+**Deploy is skipped on pull requests, deliberately.** Running `terraform apply` against real infrastructure on every PR — including unreviewed ones — would mean unreviewed code could deploy itself. The job has `if: github.event_name != 'pull_request'`; the security-scan job still runs in full on PRs, nothing in `deploy` ever runs against one.
 
 **Authentication is via OIDC, not stored credentials.** No long-lived AWS access keys exist in GitHub at all. The job requests a short-lived OIDC token proving "this is really a run of this repo, on this branch," and exchanges it for temporary credentials scoped to the `tfdriftmonitor-github-deploy` role from `bootstrap/`. This requires an explicit `permissions: id-token: write` block on the job — the single most commonly forgotten requirement when wiring up GitHub OIDC, and one that fails with an error that doesn't obviously point back to the missing block.
 
 **`terraform init` uses `-backend-config` flags, not a hardcoded bucket name.** Terraform backend blocks can't use variables or interpolation, and the state bucket's name is unpredictable by design (same reasoning as the deployments bucket). The actual bucket name comes from the `STATE_BUCKET` repo variable, supplied at init time, never committed as a literal string anywhere in this repo.
 
 **`terraform apply -auto-approve` — no human is in the loop to type "yes."** This is standard for CI/CD specifically. It does **not** mean confirmation is skipped everywhere: local applies to `bootstrap/` and `lambda-infra/` still require typing `yes`, since neither root is ever applied by CI.
+
+### Runtime data flow: what a check run actually does
+
+1. EventBridge: `rate(7 days)`, or manual invoke via the Terraform output command.
+2. Config pulled from SSM — Anthropic key, optional GitHub token, repo/branch/path list.
+3. `.tf` files fetched per repo over the GitHub API; providers parsed out (name, source, version constraint).
+4. Each provider checked against the HashiCorp registry's latest version. Major gap = CRITICAL, minor = WARNING, patch = INFO. No upper bound on the constraint = WARNING regardless of version.
+5. CRITICAL findings only: S3 cache check by `provider+version` (a release's changelog content never changes) → Anthropic API call only on a cache miss, filtered to the repo's actual resource types, result written back to cache.
+6. Findings → `drift-findings` SNS topic (KMS-encrypted) → email.
+7. Independent of any single run: 3 CloudWatch alarms (errors, throttles, not-invoked) — catches a silently broken schedule even when there's no email to flag it.
 
 ---
 
@@ -361,25 +386,6 @@ The `response.json` output gives you a one-line summary
 detail behind that summary, follow up with `aws logs tail` (or the
 manual two-step approach above) right after.
 
-
-
-- [ ] `lambda/handler.py` + `lambda/notifier.py` — application entry point
-- [ ] Test fixtures + unit tests for the version-diff and HCL parsing logic
-- [ ] `preflight.py` — role + code integrity checking, JIT permission grant/revoke
-- [ ] `incident.py` — tamper response (silent revoke, out-of-band alert)
-- [ ] `prod.yml` — approval-gated production pipeline
-- [ ] bandit, pip-audit, gitleaks layered onto the existing checkov-based `dev.yml`
-- [ ] PR template + branch protection rules
-- [ ] Negative test proving tamper detection actually works
-- [ ] Remote Terraform state with locking (currently local state — see TROUBLESHOOTING.md for the risk this carries)
-- [ ] Windows PowerShell build script (`scripts/build.ps1`) for local
-      `terraform apply` on Windows. Not required — the actual pipeline
-      runs on Linux GitHub Actions runners. The `build_script` Terraform
-      variable already supports swapping this in once built, with no
-      changes needed elsewhere.
-- [ ] Multi-vendor AI model support (OpenAI, Gemini) — deliberately deferred, Claude-only for now
-- [ ] SES sender migrated to a verified custom domain (cosmetic, not a security requirement)
-
 ---
 
 ## Known scaling limitations (honest, not yet addressed)
@@ -463,6 +469,16 @@ iteration doesn't have to rediscover them from scratch.
       (`fasthd97/driftmonitor`) — confirmed real findings, real SNS
       delivery, real AI-extracted breaking changes, confirmed working
       AFTER the three-root split (not just before it)
+- [x] Unit tests for the parser, version-diff, and AI-filtering logic
+      (53 tests, `pytest`, no AWS credentials needed) — caught a real
+      stray-quote bug in `parse_resource_types` that was already
+      shipping in production, fixed and redeployed
+- [x] bandit, pip-audit, gitleaks layered onto `dev.yml` alongside
+      checkov — covering Python source, dependency CVEs, and full git
+      history for secrets respectively. All three tested standalone
+      against this exact codebase before being wired in (all came back
+      clean), so all three are a hard fail from the start rather than
+      eased in with `soft_fail` like checkov needed
 
 ### Not yet built
 
@@ -475,16 +491,9 @@ iteration doesn't have to rediscover them from scratch.
       out-of-band SES channel
 - [ ] `prod.yml` — approval-gated production pipeline, building on the
       proven `dev.yml` skeleton
-- [ ] bandit, pip-audit, gitleaks — layered onto `dev.yml` alongside
-      checkov (currently the only security tool wired up — a
-      deliberate sequencing choice to get a real green run first, not
-      an oversight)
 - [ ] PR template + branch protection rules with a real reviewer
       checklist (not a rubber stamp)
 - [ ] Negative test proving the role tamper detection actually works
-- [ ] Unit tests for the parser and version-diff logic (pytest, no
-      AWS credentials required — same pattern as the original
-      `driftmonitor` project's test suite)
 
 ### Deferred, lower priority
 

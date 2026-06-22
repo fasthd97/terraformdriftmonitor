@@ -37,6 +37,13 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
+        with:
+          # fetch-depth: 0 = full history, not the default shallow
+          # clone (latest commit only). Required for gitleaks below to
+          # scan history at all - a shallow clone would make it
+          # functionally blind to anything not in the single latest
+          # commit, defeating its actual purpose.
+          fetch-depth: 0
 
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@master
@@ -62,6 +69,57 @@ jobs:
           # SECURITY-FINDINGS.md - this only changes WHERE the
           # suppression is declared, not why each finding is accepted.
           skip_check: CKV_AWS_108,CKV_AWS_109,CKV_AWS_110,CKV_AWS_111,CKV_AWS_356
+
+      # WHY bandit: checkov scans Terraform infrastructure config; it
+      # has no visibility into the Lambda's own Python source code.
+      # bandit covers a different layer entirely - common Python
+      # security anti-patterns (e.g. shell injection, insecure
+      # deserialization, hardcoded credentials) inside lambda/ itself.
+      # Tested locally against this exact codebase before being wired
+      # in here: zero findings, so this is a hard fail from the start,
+      # not eased in with soft_fail like checkov needed.
+      - name: Set up Python for security scanners
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bandit (Python security linter)
+        run: |
+          pip install bandit --quiet
+          bandit -r lambda/
+
+      # WHY pip-audit: checks the Lambda's declared dependencies
+      # (lambda/requirements.txt) against known CVE databases. A
+      # dependency can be perfectly configured and still be a real
+      # vulnerability if a known-bad version is pinned. Also tested
+      # clean locally against this exact requirements file first.
+      - name: Run pip-audit (dependency vulnerability scan)
+        run: |
+          pip install pip-audit --quiet
+          pip-audit -r lambda/requirements.txt
+
+      # WHY gitleaks: scans git history (not just the current working
+      # tree) for accidentally committed secrets - API keys, tokens,
+      # credentials. This catches a class of leak the other three
+      # tools don't: something that was committed and later removed,
+      # which still lives in history unless the repo itself is rewritten.
+      #
+      # Installed as the raw binary rather than the official
+      # gitleaks/gitleaks-action: that action's license (proprietary
+      # since v2.0.0) only requires a paid key for GitHub
+      # Organization-owned repos, not personal accounts like this one
+      # - but calling the CLI directly keeps every scanner in this job
+      # on the same footing (a plain tool install, no third-party
+      # action's terms to track) and matches exactly what was already
+      # verified locally before wiring this in.
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks (secret scanning, full git history)
+        run: gitleaks detect --source . --verbose
 
   deploy:
     name: Deploy Lambda (terraform/lambda-code)
