@@ -4,7 +4,14 @@
 # Python runtime, packaging it adds ~10MB to the zip for no benefit.
 
 # requests: used by github.py, hashicorp.py, ai_changelog.py
-requests==2.32.3
+# Pinned to 2.33.0 specifically (not just "latest") because it's the
+# earliest version fixing two CVEs pip-audit found against 2.32.3:
+#   CVE-2024-47081 — a crafted URL could leak .netrc credentials to
+#     the wrong host (fixed in 2.32.4)
+#   CVE-2026-25645 — extract_zipped_paths could extract to a
+#     predictable location (fixed in 2.33.0); only affects code that
+#     calls that utility directly, which this project doesn't
+requests==2.33.0
 
 # python-hcl2: parses Terraform HCL files in terraform_parser.py.
 # A proper HCL parser rather than regex, so we correctly handle all
